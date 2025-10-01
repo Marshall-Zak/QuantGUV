@@ -1,0 +1,121 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+
+# Functions
+def load_tif_image(file_path):
+    """Load a TIF image as a numpy array."""
+    image = Image.open(file_path)
+    return np.array(image, dtype=np.float32)  # Ensure float for calculations
+
+def load_and_average_images(folder_path):
+    """Load and average multiple TIF images from a folder."""
+    image_arrays = []
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".tif"):
+            image_path = os.path.join(folder_path, filename)
+            image = load_tif_image(image_path)
+            image_arrays.append(image)
+    
+    if not image_arrays:
+        raise ValueError("No TIF images found in the folder.")
+    
+    avg_image = np.mean(image_arrays, axis=0)
+    return avg_image
+
+def calculate_calibration_profile(avg_image):
+    """Calculate the calibration profile from the averaged image."""
+    avg_intensity = np.mean(avg_image)
+    
+    # Avoid division by zero by masking or excluding zero pixels
+    calibration_profile = np.zeros_like(avg_image)
+    nonzero_mask = avg_image > 0
+    calibration_profile[nonzero_mask] = avg_intensity / avg_image[nonzero_mask]
+    
+    return calibration_profile, avg_intensity
+
+def save_3d_graph(calibration_profile, save_path):
+    """Save a 3D plot of the calibration profile."""
+    x = np.arange(calibration_profile.shape[1])
+    y = np.arange(calibration_profile.shape[0])
+    X, Y = np.meshgrid(x, y)
+    Z = calibration_profile
+    
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_surface(X, Y, Z, cmap='viridis')
+    
+    ax.set_xlabel('X Coordinate')
+    ax.set_ylabel('Y Coordinate')
+    ax.set_zlabel('Correction Factor')
+    ax.set_title('Correction Map')
+    
+    plt.savefig(save_path)
+    plt.close()
+
+def apply_correction(image_array, calibration_profile):
+    """Apply the calibration profile to the new image."""
+    corrected_image = image_array * calibration_profile
+    corrected_image = np.clip(corrected_image, 0, 65535)  # Ensure valid range for 16-bit
+    return corrected_image.astype(np.uint16)
+
+def save_tif_image(image_array, save_path):
+    """Save a numpy array as a 16-bit TIF image."""
+    image = Image.fromarray(image_array)
+    image.save(save_path, format='TIFF')
+    
+def save_histogram_comparison(original, corrected, save_path, bins=256):
+    """Save a histogram comparison of the original and corrected images."""
+    plt.figure(figsize=(10, 5))
+    
+    plt.hist(original.ravel(), bins=bins, color='gray', alpha=0.6, label='Original')
+    plt.hist(corrected.ravel(), bins=bins, color='green', alpha=0.6, label='Corrected')
+    
+    plt.xlabel("Pixel Intensity")
+    plt.ylabel("Frequency")
+    plt.title("Histogram Comparison")
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    
+# Define file paths
+flatfield_folder_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\0-Bulk_Calibration\mEGFP\40x_Calibration" #Options mEGFP/SRB and 40x/40x
+correction_map_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\0-Bulk_Calibration\mEGFP\40x_Calibration\Correction_map.png" #Per Pixel Adjustment Map
+target_folder_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\Intergration Time Validation\TIFs"#Options mEGFP/SRB and 40x/40x
+output_folder_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\Intergration Time Validation\TIFs\Normalised" #Where Normalised images are saved
+histogram_folder_path = os.path.join(output_folder_path, "Histograms")
+
+# Ensure output folder exists
+os.makedirs(output_folder_path, exist_ok=True)
+os.makedirs(histogram_folder_path, exist_ok=True)
+
+# Load and average flat-field images to compute calibration profile
+avg_flatfield = load_and_average_images(flatfield_folder_path)
+calibration_profile, avg_intensity = calculate_calibration_profile(avg_flatfield)
+
+# Save 3D graph of the calibration profile
+save_3d_graph(calibration_profile, correction_map_path)
+
+# Process all TIF images in the target folder
+for filename in os.listdir(target_folder_path):
+    if filename.endswith(".tif"):
+        target_image_path = os.path.join(target_folder_path, filename)
+        output_image_path = os.path.join(output_folder_path, f"{os.path.splitext(filename)[0]}_Flat.tif")
+        
+        # Load target image and apply correction
+        target_image = load_tif_image(target_image_path)
+        corrected_image = apply_correction(target_image, calibration_profile)
+        
+        # Save corrected image
+        save_tif_image(corrected_image, output_image_path)
+        print(f"Processed: {filename} -> {output_image_path}")
+        
+        # Save histogram comparison
+        histogram_path = os.path.join(histogram_folder_path, f"{os.path.splitext(filename)[0]}_histogram.png")
+        save_histogram_comparison(target_image, corrected_image, histogram_path)
+
+
+print("Batch processing completed successfully!")
