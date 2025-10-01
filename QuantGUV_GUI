@@ -1,0 +1,868 @@
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+import os
+from openpyxl import Workbook
+import tkinter as tk
+from tkinter import filedialog, ttk
+import traceback
+import math
+
+# Global variables for image preview functionality and interactive saving
+# Stores (image_np_array, list_of_guv_dicts, original_image_file_name)
+processed_images_data_global = [] 
+current_image_index = -1
+tk_image_ref = None # To hold the PhotoImage object and prevent garbage collection
+image_display_label = None # Reference to the label that displays the image
+image_index_label = None # Reference to the label showing image count
+prev_button = None # Reference to the previous button
+next_button = None # Reference to the next button
+finish_review_button = None # Reference to the finish review button
+tab_control = None # Reference to the tab control
+status_label = None # To display messages to the user
+guv_checkbox_container = None # Reference to the frame holding GUV checkboxes
+
+# Define fixed maximum dimensions for the preview image
+MAX_PREVIEW_WIDTH = 800
+MAX_PREVIEW_HEIGHT = 600
+
+# Global variable for zoom level
+zoom_level = 1.0 # Initial zoom level (1.0 = 100%)
+
+def _prepare_image_and_detect_blobs(input_path, params):
+    """
+    Handles all image loading, pre-processing (grayscale, invert, threshold),
+    and blob detection for a single image.
+
+    Args:
+        input_path (str): The full path to the input image file.
+        params (cv2.SimpleBlobDetector_Params): The parameters for blob detection.
+
+    Returns:
+        tuple: A tuple containing:
+            - im_color (numpy.ndarray): The original color image.
+            - original_gray (numpy.ndarray): The original image (unchanged, can be grayscale or color).
+            - keypoints (list): A list of detected keypoints (blobs).
+            - error (str): An error message if an error occurred, otherwise None.
+    """
+    try:
+        im_color = cv2.imread(input_path)
+        if im_color is None:
+            return None, None, [], f"Error: Unable to load color image: {os.path.basename(input_path)}"
+
+        original_gray = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+        if original_gray is None:
+            return im_color, None, [], f"Error: Unable to load original image for intensity calculations: {os.path.basename(input_path)}"
+
+        # Image pre-processing for blob detection
+        im_gray = cv2.cvtColor(im_color, cv2.COLOR_BGR2GRAY)
+        im_inverted = cv2.bitwise_not(im_gray)
+        _, im_thresholded = cv2.threshold(im_inverted, 0, 255,
+                                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Blob detection
+        detector = cv2.SimpleBlobDetector_create(params)
+        keypoints = detector.detect(im_thresholded)
+        print(f"{os.path.basename(input_path)}: Number of blobs detected: {len(keypoints)}")
+
+        return im_color, original_gray, keypoints, None
+
+    except Exception as e:
+        error_msg = f"Error during image processing for {os.path.basename(input_path)}: {e}"
+        traceback.print_exc()
+        return None, None, [], error_msg
+
+def detect_and_quantify_guvs(input_folder, scale_factor, params):
+    """
+    Detects and quantifies GUVs in images.
+    Returns a list of tuples: (original_color_image_np_array, list_of_guv_dicts, original_image_file_name).
+    Images are NOT saved to disk here.
+    """
+    image_files = [f for f in os.listdir(input_folder) if
+                   f.lower().endswith((".tif", ".png", ".jpg", ".jpeg"))]
+
+    if not image_files:
+        print("No image files found in the input folder.")
+        return []
+
+    results_for_review = []
+
+    for image_file in image_files:
+        input_path = os.path.join(input_folder, image_file)
+
+        im_color, original_gray, keypoints, error = _prepare_image_and_detect_blobs(input_path, params)
+
+        if error:
+            print(error)
+            continue
+        if not keypoints:
+            print(f"No GUVs detected or an issue occurred for {image_file}. Skipping quantification.")
+            continue
+
+        guv_data_list = [] # This will hold data for the current image's blobs, including acceptance status
+
+        # Calculate background intensity from the lowest 10% of pixels in the background mask
+        # This background will be used for all GUVs in the current image
+        total_blob_mask_for_background = np.zeros_like(im_color[:,:,0], dtype=np.uint8)
+        for kp_inner in keypoints:
+            x_inner, y_inner = int(kp_inner.pt[0]), int(kp_inner.pt[1])
+            radius_inner = int(kp_inner.size / 2)
+            cv2.circle(total_blob_mask_for_background, (x_inner, y_inner), radius_inner, 255, -1)
+        background_mask = cv2.bitwise_not(total_blob_mask_for_background)
+        background_pixels = original_gray[background_mask > 0]
+        
+        background_intensity = 0
+        if background_pixels.size > 0:
+            sorted_pixels = np.sort(background_pixels.flatten())
+            num_pixels_for_background = max(1, int(len(sorted_pixels) * 0.10))
+            background_intensity = np.mean(sorted_pixels[:num_pixels_for_background])
+
+        for i, kp in enumerate(keypoints):
+            diameter_um = kp.size * scale_factor
+            area_pixels = (kp.size / 2) ** 2 * math.pi
+            x, y = int(kp.pt[0]), int(kp.pt[1])
+            
+            # Define a square region around the GUV for intensity calculation
+            square_size = 10 # This is a fixed size, consider making it dynamic based on GUV size if needed
+            half_size = square_size // 2
+            top_left_x = max(x - half_size, 0)
+            top_left_y = max(y - half_size, 0)
+            bottom_right_x = min(x + half_size, original_gray.shape[1])
+            bottom_right_y = min(y + half_size, original_gray.shape[0])
+
+            square_region = original_gray[top_left_y:bottom_right_y, top_left_x:bottom_right_x]
+            average_intensity = np.mean(square_region)
+
+            normalized_intensity = average_intensity - background_intensity
+            
+            # Store all relevant data for each GUV, including its keypoint and acceptance status
+            guv_data_list.append({
+                "kp": kp, # Store the keypoint object for drawing and click detection
+                "Image Name": image_file,
+                "Description": f"GUV {i + 1}", # Store original GUV identifier
+                "Diameter (µm)": round(diameter_um, 2),
+                "Area (pixels)": round(area_pixels, 2),
+                "Intensity": round(average_intensity, 2),
+                "Background Normalized": round(normalized_intensity, 2),
+                "is_accepted": True # Default to accepted
+            })
+        
+        # Store the original color image, the list of GUV data, and the filename
+        results_for_review.append((im_color, guv_data_list, image_file))
+
+    status_label.config(text="Processing complete. Review images in 'Previews' tab.")
+    return results_for_review
+
+def draw_guv_on_image(image_np, guv_data_list):
+    """Draws GUVs, their info, and labels on a copy of the image based on acceptance status."""
+    im_copy = np.copy(image_np)
+    # Convert from BGR (OpenCV) to RGB (Pillow)
+    im_copy = cv2.cvtColor(im_copy, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(im_copy)
+    draw = ImageDraw.Draw(pil_image)
+
+    try:
+        # Load a font for drawing text on the image
+        font_size_label = 36 # Increased font size for labels on the image
+        font_label = ImageFont.truetype("arial.ttf", font_size_label)
+    except OSError:
+        print("Arial font not found. Falling back to default font.")
+        font_label = ImageFont.load_default()
+    
+    for guv_data in guv_data_list:
+        kp = guv_data["kp"]
+        x, y = int(kp.pt[0]), int(kp.pt[1])
+        radius = int(kp.size // 2)
+        
+        # Define bounding box for the ellipse (circle)
+        left = x - radius
+        top = y - radius
+        right = x + radius
+        bottom = y + radius
+
+        # Text color is now always red as per request
+        text_color = (255, 0, 0) # Red color for GUV labels
+
+        if guv_data["is_accepted"]:
+            circle_outline_color = (0, 0, 255) # Blue for accepted GUVs (RGB)
+        else:
+            circle_outline_color = (255, 0, 0) # Red for rejected GUVs (RGB)
+            # Draw a cross for rejected GUVs
+            line_thickness = 3
+            draw.line((left, top, right, bottom), fill=circle_outline_color, width=line_thickness)
+            draw.line((left, bottom, right, top), fill=circle_outline_color, width=line_thickness)
+
+        # Draw the circle outline using PIL.ImageDraw for all detected GUVs
+        draw.ellipse((left, top, right, bottom), outline=circle_outline_color, width=3)
+
+        # Draw the GUV identifier (e.g., "GUV 1") on the image
+        label_text = guv_data["Description"]
+        
+        # Calculate text size using getbbox for Pillow 9.0.0+ compatibility
+        # getbbox returns (left, top, right, bottom)
+        bbox = font_label.getbbox(label_text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Position the text slightly above and to the right of the GUV center
+        text_x = x + radius + 5
+        text_y = y - radius - text_height - 5 # Adjust position to be above the circle
+
+        # Ensure text is not drawn outside image bounds
+        text_x = max(0, text_x)
+        text_y = max(0, text_y)
+        
+        draw.text((text_x, text_y), label_text, font=font_label, fill=text_color)
+    
+    return np.array(pil_image)
+
+
+def on_zoom_scroll(event):
+    """Handles Control + MouseWheel event for zooming."""
+    global zoom_level
+    if event.delta > 0: # Scroll up (zoom in)
+        zoom_level *= 1.1
+    else: # Scroll down (zoom out)
+        zoom_level /= 1.1
+    
+    # Clamp zoom_level to reasonable bounds
+    zoom_level = max(0.1, min(zoom_level, 5.0)) # Min 10%, Max 500%
+    show_current_image()
+
+def on_image_click(event):
+    """Handles clicks on the image preview to toggle GUV acceptance."""
+    global processed_images_data_global, current_image_index, image_display_label
+
+    # Ensure there is a valid image and scaling factors are available
+    if current_image_index == -1 or not hasattr(image_display_label, 'scale_x'):
+        return
+
+    # Get click coordinates relative to the displayed (resized) image
+    click_x_resized = event.x
+    click_y_resized = event.y
+
+    # Retrieve scaling factors stored on the label
+    scale_x = image_display_label.scale_x
+    scale_y = image_display_label.scale_y
+
+    # Convert click coordinates to the original image's coordinate system
+    click_x_original = click_x_resized * scale_x
+    click_y_original = click_y_resized * scale_y
+    
+    # Get the GUV data for the current image
+    _, guv_data_list, _ = processed_images_data_global[current_image_index]
+
+    # Find which GUV was clicked (if any)
+    for i, guv_data in enumerate(guv_data_list):
+        kp = guv_data["kp"]
+        guv_center_x, guv_center_y = kp.pt[0], kp.pt[1]
+        guv_radius = kp.size / 2
+
+        # Calculate distance from click to GUV center
+        distance = math.sqrt((click_x_original - guv_center_x)**2 + (click_y_original - guv_center_y)**2)
+
+        if distance <= guv_radius:
+            # Found a match! Toggle the acceptance status
+            guv_data["is_accepted"] = not guv_data["is_accepted"]
+            
+            # Redraw the image and update UI to reflect the change immediately
+            show_current_image()
+            
+            # Stop searching once the first GUV is found and toggled
+            break
+
+def show_current_image():
+    """Displays the image at the current_image_index in the preview tab."""
+    global tk_image_ref, image_display_label, image_index_label, prev_button, next_button, \
+           processed_images_data_global, current_image_index, status_label, guv_checkbox_container, zoom_level
+
+    # Clear existing checkboxes
+    for widget in guv_checkbox_container.winfo_children():
+        widget.destroy()
+
+    if not processed_images_data_global:
+        image_display_label.config(image='')
+        image_index_label.config(text="No images to display.")
+        prev_button.config(state="disabled")
+        next_button.config(state="disabled")
+        return
+
+    # Ensure index is within bounds
+    if current_image_index < 0:
+        current_image_index = 0
+    elif current_image_index >= len(processed_images_data_global):
+        current_image_index = len(processed_images_data_global) - 1
+
+    original_im_color, guv_data_list, original_file_name = processed_images_data_global[current_image_index]
+    
+    try:
+        # Draw GUVs on a fresh copy of the original image based on their acceptance status
+        annotated_image_np = draw_guv_on_image(original_im_color, guv_data_list)
+
+        pil_image = Image.fromarray(annotated_image_np) 
+
+        # Get original dimensions BEFORE resizing for calculating scale factors
+        original_width, original_height = pil_image.size
+
+        # Use fixed maximum dimensions for resizing, multiplied by zoom_level
+        max_width_zoomed = int(MAX_PREVIEW_WIDTH * zoom_level)
+        max_height_zoomed = int(MAX_PREVIEW_HEIGHT * zoom_level)
+
+        aspect_ratio = original_width / original_height
+
+        # Calculate new dimensions while maintaining aspect ratio and respecting zoom
+        if original_width / max_width_zoomed > original_height / max_height_zoomed:
+            new_width = max_width_zoomed
+            new_height = int(new_width / aspect_ratio)
+        else:
+            new_height = max_height_zoomed
+            new_width = int(new_height * aspect_ratio)
+        
+        # Ensure minimum size to prevent image from disappearing
+        new_width = max(1, new_width)
+        new_height = max(1, new_height)
+
+        # Store the scaling factors on the label for use in the click event
+        image_display_label.scale_x = original_width / new_width
+        image_display_label.scale_y = original_height / new_height
+
+        pil_image_resized = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        tk_image_ref = ImageTk.PhotoImage(pil_image_resized)
+        image_display_label.config(image=tk_image_ref)
+        image_index_label.config(text=f"Image {current_image_index + 1} of {len(processed_images_data_global)} - {original_file_name}")
+
+        # Populate GUV checkboxes
+        for i, guv_data in enumerate(guv_data_list):
+            # Create a BooleanVar for each GUV's acceptance status
+            guv_var = tk.BooleanVar(value=guv_data["is_accepted"])
+            
+            # Link the BooleanVar to the guv_data dictionary
+            # When the checkbox is toggled, update the guv_data and redraw the image
+            def create_callback(idx, guv_var_obj):
+                def callback(*args):
+                    processed_images_data_global[current_image_index][1][idx]["is_accepted"] = guv_var_obj.get()
+                    show_current_image() # Redraw image to reflect change
+                return callback
+            
+            guv_var.trace_add("write", create_callback(i, guv_var))
+
+            # Create the checkbox text
+            checkbox_text = (f"{guv_data['Description']}: {guv_data['Diameter (µm)']:.2f} µm, "
+                             f"{guv_data['Intensity']:.2f} intensity")
+            
+            chk = ttk.Checkbutton(guv_checkbox_container, text=checkbox_text, variable=guv_var)
+            chk.pack(anchor="w", pady=2)
+        
+        # Update the scroll region of the GUV list canvas
+        guv_list_canvas.update_idletasks()
+        guv_list_canvas.config(scrollregion=guv_list_canvas.bbox("all"))
+
+        # Update button states
+        prev_button.config(state="normal" if current_image_index > 0 else "disabled")
+        next_button.config(state="normal" if current_image_index < len(processed_images_data_global) - 1 else "disabled")
+        
+        # Status update
+        accepted_count = sum(1 for guv in guv_data_list if guv['is_accepted'])
+        total_guvs = len(guv_data_list)
+        status_label.config(text=f"GUVs in current image: {accepted_count}/{total_guvs} accepted. Click GUV or use checkbox to toggle. Zoom: {int(zoom_level*100)}%")
+
+    except Exception as e:
+        print(f"Error loading image for preview: {e}")
+        traceback.print_exc() # Print full traceback for debugging
+        image_display_label.config(image='')
+        image_index_label.config(text="Error loading image.")
+        prev_button.config(state="disabled")
+        next_button.config(state="disabled")
+        status_label.config(text="Error displaying image.")
+
+
+def next_image():
+    """Moves to the next image in the preview."""
+    global current_image_index, zoom_level
+    if current_image_index < len(processed_images_data_global) - 1:
+        current_image_index += 1
+        zoom_level = 1.0 # Reset zoom when changing image
+        show_current_image()
+
+def prev_image():
+    """Moves to the previous image in the preview."""
+    global current_image_index, zoom_level
+    if current_image_index > 0:
+        current_image_index -= 1
+        zoom_level = 1.0 # Reset zoom when changing image
+        show_current_image()
+
+def start_interactive_review(results_data):
+    """Initializes the preview display with the given image data."""
+    global processed_images_data_global, current_image_index, tab_control, status_label, zoom_level
+    
+    processed_images_data_global = results_data
+    current_image_index = 0
+    zoom_level = 1.0 # Reset zoom for the first image of a new batch
+    show_current_image()
+    
+    # Enable review buttons
+    finish_review_button.config(state="normal")
+
+    if tab_control:
+        tab_control.select(1) # Switch to the Previews tab (index 1)
+    status_label.config(text="Review images. Use checkboxes to toggle GUV acceptance. Click 'Finish Review and Save' when done.")
+
+
+def finish_review_and_save():
+    """Saves accepted images and their data to Excel."""
+    global processed_images_data_global, status_label, zoom_level
+
+    output_folder = output_folder_var.get()
+    excel_path = excel_path_var.get()
+
+    if not output_folder:
+        status_label.config(text="Error: Output folder not selected.")
+        return
+    if not excel_path:
+        status_label.config(text="Error: Excel file path not specified.")
+        return
+    
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "GUV Details"
+
+    headers = ["Image Name", "Description", "Diameter (µm)", "Area (pixels)", "Intensity",
+               "Background Normalized"]
+    for col, header in enumerate(headers, start=1):
+        sheet.cell(row=1, column=col, value=header)
+
+    excel_row = 2
+    saved_image_count = 0
+    saved_guv_count = 0
+
+    status_label.config(text="Saving accepted images and data...")
+    root.update_idletasks() # Update GUI to show status
+
+    for idx, (original_im_color, guv_data_list, original_file_name) in enumerate(processed_images_data_global):
+        accepted_guvs_in_image = [guv for guv in guv_data_list if guv["is_accepted"]]
+        
+        if accepted_guvs_in_image:
+            # Create a new annotated image with only the accepted GUVs
+            # Note: draw_guv_on_image returns RGB, but imwrite expects BGR, so convert it back
+            temp_annotated_image_np_rgb = draw_guv_on_image(original_im_color, accepted_guvs_in_image)
+            temp_annotated_image_np_bgr = cv2.cvtColor(temp_annotated_image_np_rgb, cv2.COLOR_RGB2BGR)
+            
+            # Extend image for legend
+            height, width = temp_annotated_image_np_bgr.shape[:2]
+            legend_height = 200
+            total_height = height + legend_height
+            final_saved_image = np.ones((total_height, width, 3), dtype=np.uint8) * 255
+            final_saved_image[:height, :width] = temp_annotated_image_np_bgr
+
+            # Convert back to PIL for drawing text
+            pil_image_for_save = Image.fromarray(cv2.cvtColor(final_saved_image, cv2.COLOR_BGR2RGB))
+            draw_for_save = ImageDraw.Draw(pil_image_for_save)
+            try:
+                font_legend = ImageFont.truetype("arial.ttf", 20)
+            except OSError:
+                font_legend = ImageFont.load_default()
+            text_color_legend = "#002868"
+
+            # Draw a simplified legend for the saved image
+            legend_x, legend_y = 20, height + 20
+            for i, data in enumerate(accepted_guvs_in_image):
+                text = f"{data['Description']}: {data['Diameter (µm)']:.2f} µm, {data['Intensity']:.2f} intensity"
+                draw_for_save.text((legend_x, legend_y + i * 30), text, font=font_legend, fill=text_color_legend)
+
+            output_path = os.path.join(output_folder,
+                                       f"Accepted_{os.path.splitext(original_file_name)[0]}.png")
+            
+            # Save the image using OpenCV (requires BGR format)
+            final_image_to_save_bgr = cv2.cvtColor(np.array(pil_image_for_save), cv2.COLOR_RGB2BGR)
+            cv2.imwrite(output_path, final_image_to_save_bgr)
+            
+            print(f"Saved accepted image: {output_path}")
+            saved_image_count += 1
+            
+            # Write blob info to Excel for accepted GUVs
+            for blob_data in accepted_guvs_in_image:
+                sheet.cell(row=excel_row, column=1, value=blob_data["Image Name"])
+                sheet.cell(row=excel_row, column=2, value=blob_data["Description"])
+                sheet.cell(row=excel_row, column=3, value=blob_data["Diameter (µm)"])
+                sheet.cell(row=excel_row, column=4, value=blob_data["Area (pixels)"])
+                sheet.cell(row=excel_row, column=5, value=blob_data["Intensity"])
+                sheet.cell(row=excel_row, column=6, value=blob_data["Background Normalized"])
+                excel_row += 1
+            saved_guv_count += len(accepted_guvs_in_image)
+        else:
+            print(f"No GUVs accepted for image: {original_file_name}. Skipping save.")
+    
+    # Save the Excel workbook
+    try:
+        workbook.save(excel_path)
+        print(f"Excel file saved as: {excel_path}")
+        status_label.config(text=f"Review complete. {saved_image_count} images saved ({saved_guv_count} GUVs) and data written to Excel.")
+    except Exception as e:
+        status_label.config(text=f"Error saving Excel file: {e}")
+        print(f"Error saving Excel file: {e}")
+        traceback.print_exc()
+
+    # Clear data after saving
+    processed_images_data_global.clear()
+    current_image_index = -1
+    image_display_label.config(image='')
+    # Clear checkboxes
+    for widget in guv_checkbox_container.winfo_children():
+        widget.destroy()
+    image_index_label.config(text="Review finished. No images to display.")
+    prev_button.config(state="disabled")
+    next_button.config(state="disabled")
+    finish_review_button.config(state="disabled")
+    tab_control.select(0) # Go back to home tab
+    zoom_level = 1.0 # Reset zoom for next run
+
+
+def run_analysis():
+    """Runs the GUV analysis with user-defined parameters."""
+    input_folder = input_folder_var.get()
+    output_folder = output_folder_var.get()
+    excel_path = excel_path_var.get()
+
+    if not input_folder:
+        status_label.config(text="Error: Please select an input folder.")
+        return
+    if not output_folder:
+        status_label.config(text="Error: Please select an output folder.")
+        return
+    if not excel_path:
+        status_label.config(text="Error: Please specify an Excel file path.")
+        return
+
+    scale_factor_str = scale_factor_var.get()
+    try:
+        scale_factor = eval(scale_factor_str)
+        scale_factor = float(scale_factor)
+    except (SyntaxError, NameError, TypeError, ZeroDivisionError):
+        status_label.config(text="Invalid scale factor. Please enter a valid numerical expression.")
+        return
+
+    params = cv2.SimpleBlobDetector_Params()
+    params.minThreshold = int(min_threshold_var.get())
+    params.maxThreshold = int(max_threshold_var.get())
+    min_diameter = float(min_diameter_var.get())
+    max_diameter = float(max_diameter_var.get())
+
+    min_radius_pixels = (min_diameter / 2) / scale_factor
+    max_radius_pixels = (max_diameter / 2) / scale_factor
+    min_area = math.pi * min_radius_pixels**2
+    max_area = math.pi * max_radius_pixels**2
+    
+    if min_area <= max_area:
+        params.minArea = min_area
+        params.maxArea = max_area
+    else:
+        status_label.config(text="Error: Min diameter must be less than or equal to max diameter. Setting both to 0.")
+        params.minArea = 0
+        params.maxArea = 0
+    params.filterByCircularity = filter_by_circularity.get()
+    params.minCircularity = float(min_circularity_var.get()) if filter_by_circularity.get() else 0.0001
+    params.maxCircularity = 1.0
+    params.filterByConvexity = False
+    params.minConvexity = 0.9
+    params.minInertiaRatio = 0.0001 
+
+    params.filterByArea = True
+    params.filterByCircularity = filter_by_circularity.get()
+
+    status_label.config(text="Processing images... Please wait.")
+    root.update_idletasks() # Update GUI to show status
+
+    results_data = detect_and_quantify_guvs(input_folder, scale_factor, params)
+    
+    # Start the interactive review process
+    if results_data:
+        start_interactive_review(results_data)
+    else:
+        status_label.config(text="No images processed or no GUVs detected.")
+
+
+# GUI setup
+root = tk.Tk()
+root.title("QuantGUV v2.0") # Updated version
+
+# Get screen dimensions
+screen_width = root.winfo_screenwidth()
+screen_height = root.winfo_screenheight()
+
+# Set window size to half of screen width and height
+window_width = screen_width // 2
+window_height = screen_height // 2
+root.geometry(f"{window_width}x{window_height}")
+
+# Modern Style
+style = ttk.Style()
+style.theme_use("clam")
+
+# Configure style for labels
+style.configure("TLabel", foreground="#333", font=("Segoe UI", 10))
+
+# Configure style for buttons
+style.configure("TButton", padding=(10, 8), font=("Segoe UI", 10),
+                  background="#0078D4", foreground="white")
+style.map("TButton", background=[('active', '#005A9E')])
+style.configure("RunButton.TButton", padding=10, font=("Segoe UI", 10),
+                  background="#0078D4", foreground="white")
+style.map("RunButton.TButton", background=[('active', '#005A9E')])
+
+# Configure style for entries
+style.configure("TEntry", padding=5, font=("Segoe UI", 10))
+
+# Configure style for checkbuttons
+style.configure("TCheckbutton", padding=5, font=("Segoe UI", 10))
+
+
+# Title and Designer Label (Centered)
+title_frame = tk.Frame(root)
+title_frame.pack(pady=20)
+
+title_label = tk.Label(title_frame, text="QuantGUV v2.0", # Updated version
+                       font=("Segoe UI", 24, "bold"),
+                       foreground="#2E86C1")
+title_label.pack()
+
+designer_label = tk.Label(title_frame, text="Designed by Zak Marshall",
+                            font=("Segoe UI", 9),
+                            foreground="#666")
+designer_label.pack()
+
+# Main frame to hold the tab control and scrollbar
+main_frame = ttk.Frame(root)
+main_frame.pack(padx=20, pady=10, expand=True, fill="both")
+
+# Canvas to hold the TabControl
+canvas = tk.Canvas(main_frame)
+canvas.pack(side="left", expand=True, fill="both")
+
+# Scrollbar for the main frame
+scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+scrollbar.pack(side="right", fill="y")
+
+# Tab Control
+tab_control = ttk.Notebook(canvas)
+canvas.create_window((0, 0), window=tab_control, anchor="nw")
+
+tab_home = ttk.Frame(tab_control)
+tab_previews = ttk.Frame(tab_control)
+
+tab_control.add(tab_home, text="Home")
+tab_control.add(tab_previews, text="Previews")
+
+def configure_scroll_region(event):
+    """Update the scroll region of the canvas."""
+    canvas.configure(scrollregion=canvas.bbox("all"))
+
+tab_home.bind("<Configure>", configure_scroll_region)
+tab_control.bind("<Configure>", configure_scroll_region)
+
+
+def on_scroll(event):
+    """Handle scrolling event."""
+    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+canvas.bind_all("<MouseWheel>", on_scroll)
+canvas.configure(yscrollcommand=scrollbar.set)
+
+
+# Variables for input fields
+input_folder_var = tk.StringVar()
+output_folder_var = tk.StringVar()
+excel_path_var = tk.StringVar()
+scale_factor_var = tk.StringVar(value="100/578")
+
+min_threshold_var = tk.StringVar(value="5")
+max_threshold_var = tk.StringVar(value="255")
+min_diameter_var = tk.StringVar(value="10")
+max_diameter_var = tk.StringVar(value="100")
+min_circularity_var = tk.StringVar(value="0.7")
+
+
+# Boolean variables to track whether to filter
+filter_by_circularity = tk.BooleanVar(value=True)
+
+
+# Input Folder (HOME Tab)
+input_frame = ttk.Frame(tab_home, padding="15 10 15 10")
+input_frame.pack(fill="x", expand=True)
+
+ttk.Label(input_frame, text="Input Folder:").grid(row=0, column=0, sticky="w",
+                                                  pady=5)
+ttk.Entry(input_frame, textvariable=input_folder_var, width=40).grid(row=0,
+                                                                      column=1,
+                                                                      padx=10,
+                                                                      pady=5, sticky="ew")
+ttk.Button(input_frame, text="Browse",
+           command=lambda: input_folder_var.set(
+               filedialog.askdirectory())).grid(row=0, column=2,
+                                                pady=5)
+input_frame.columnconfigure(1, weight=1)
+
+# Output Folder (HOME Tab)
+ttk.Label(input_frame, text="Output Folder:").grid(row=1, column=0, sticky="w",
+                                                   pady=5)
+ttk.Entry(input_frame, textvariable=output_folder_var, width=40).grid(row=1,
+                                                                       column=1,
+                                                                       padx=10,
+                                                                       pady=5, sticky="ew")
+ttk.Button(input_frame, text="Browse",
+           command=lambda: output_folder_var.set(
+               filedialog.askdirectory())).grid(row=1, column=2,
+                                                pady=5)
+input_frame.columnconfigure(1, weight=1)
+
+
+# Excel File Path (HOME Tab)
+ttk.Label(input_frame, text="Excel File Path:").grid(row=2, column=0, sticky="w",
+                                                     pady=5)
+ttk.Entry(input_frame, textvariable=excel_path_var, width=40).grid(row=2,
+                                                                    column=1,
+                                                                    padx=10,
+                                                                    pady=5, sticky="ew")
+ttk.Button(input_frame, text="Browse",
+           command=lambda: excel_path_var.set(
+               filedialog.asksaveasfilename(defaultextension=".xlsx"))).grid(
+    row=2, column=2, pady=5)
+input_frame.columnconfigure(1, weight=1)
+
+
+# Scale Factor (HOME Tab)
+ttk.Label(input_frame, text="Scale Factor (µm/pixel):").grid(row=3, column=0,
+                                                              sticky="w", pady=5)
+ttk.Entry(input_frame, textvariable=scale_factor_var).grid(row=3, column=1,
+                                                            padx=10,
+                                                            pady=5, sticky="ew")
+input_frame.columnconfigure(1, weight=1)
+
+
+# Blob Detection Parameters (HOME Tab)
+blob_frame = ttk.Frame(tab_home, padding="15 10 15 10")
+blob_frame.pack(fill="x", expand=True)
+
+ttk.Label(blob_frame, text="Blob Detection Parameters:",
+          font=("Segoe UI", 12, "bold")).grid(row=4,
+                                              column=0,
+                                              columnspan=3,
+                                              pady=10)
+
+param_frame = ttk.Frame(blob_frame)
+param_frame.grid(row=5, column=0, columnspan=2, sticky='w')
+param_frame.columnconfigure(1, weight=1)
+
+
+ttk.Label(param_frame, text="Min Threshold:").grid(row=1, column=0, sticky="w",
+                                                   pady=5)
+ttk.Entry(param_frame, textvariable=min_threshold_var).grid(row=1, column=1,
+                                                            padx=10,
+                                                            pady=5, sticky="ew")
+
+ttk.Label(param_frame, text="Max Threshold:").grid(row=2, column=0, sticky="w",
+                                                   pady=5)
+ttk.Entry(param_frame, textvariable=max_threshold_var).grid(row=2, column=1,
+                                                            padx=10,
+                                                            pady=5, sticky="ew")
+
+ttk.Label(param_frame, text="Min Diameter (µm):").grid(row=3, column=0, sticky="w",
+                                                     pady=5)
+min_diameter_entry = ttk.Entry(param_frame, textvariable=min_diameter_var)
+min_diameter_entry.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
+
+ttk.Label(param_frame, text="Max Diameter (µm):").grid(row=4, column=0, sticky="w",
+                                                     pady=5)
+max_diameter_entry = ttk.Entry(param_frame, textvariable=max_diameter_var)
+max_diameter_entry.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
+
+
+filter_circularity_check = ttk.Checkbutton(param_frame, text="Filter by Circularity", variable=filter_by_circularity)
+filter_circularity_check.grid(row=5, column=0, sticky="w", pady=5)
+
+ttk.Label(param_frame, text="Min Circularity:").grid(row=6, column=0, sticky="w",
+                                                     pady=5)
+min_circularity_entry = ttk.Entry(param_frame, textvariable=min_circularity_var)
+min_circularity_entry.grid(row=6, column=1, padx=10, pady=5, sticky="ew")
+
+
+# Run Button (HOME Tab) - placed to the right
+run_button = ttk.Button(blob_frame, text="Run Analysis", command=run_analysis, style="RunButton.TButton")
+run_button.grid(row=5, column=2, rowspan=5, sticky="ne", padx=15, pady=5)
+
+def update_entry_state(*args):
+    """Disables/enables entry fields based on the state of the filter checkboxes."""
+    min_circularity_entry.config(state="normal" if filter_by_circularity.get() else "disabled")
+
+
+# Link the checkbox variables to the update function
+filter_by_circularity.trace_add("write", update_entry_state)
+
+# Call the function once at the beginning to set the initial state
+update_entry_state()
+
+
+# --- Preview Tab Elements ---
+preview_frame = ttk.Frame(tab_previews, padding="15 10 15 10")
+preview_frame.pack(fill="both", expand=True)
+
+# Frame to hold image and GUV list side-by-side
+preview_content_frame = ttk.Frame(preview_frame)
+preview_content_frame.pack(fill="both", expand=True)
+preview_content_frame.columnconfigure(0, weight=3) # Image column
+preview_content_frame.columnconfigure(1, weight=1) # GUV list column
+preview_content_frame.rowconfigure(0, weight=1)
+
+# Image display label (left side)
+image_display_label = ttk.Label(preview_content_frame, text="Processed image will appear here.", anchor="center")
+image_display_label.grid(row=0, column=0, pady=10, padx=5, sticky="nsew")
+# Bind Control + MouseWheel for zooming
+image_display_label.bind("<Control-MouseWheel>", on_zoom_scroll)
+# Bind left-click to toggle GUV acceptance
+image_display_label.bind("<Button-1>", on_image_click)
+
+
+# GUV list frame (right side)
+guv_list_outer_frame = ttk.Frame(preview_content_frame)
+guv_list_outer_frame.grid(row=0, column=1, pady=10, padx=5, sticky="nsew")
+guv_list_outer_frame.rowconfigure(0, weight=1)
+guv_list_outer_frame.columnconfigure(0, weight=1)
+
+guv_list_canvas = tk.Canvas(guv_list_outer_frame, borderwidth=0, highlightthickness=0)
+guv_list_canvas.grid(row=0, column=0, sticky="nsew")
+
+guv_list_scrollbar = ttk.Scrollbar(guv_list_outer_frame, orient="vertical", command=guv_list_canvas.yview)
+guv_list_scrollbar.grid(row=0, column=1, sticky="ns")
+guv_list_canvas.config(yscrollcommand=guv_list_scrollbar.set)
+
+guv_checkbox_container = ttk.Frame(guv_list_canvas)
+guv_list_canvas.create_window((0, 0), window=guv_checkbox_container, anchor="nw")
+
+# Configure scroll region when the inner frame changes size
+guv_checkbox_container.bind("<Configure>", lambda e: guv_list_canvas.configure(scrollregion=guv_list_canvas.bbox("all")))
+
+
+# Navigation buttons (below the image/list)
+nav_frame = ttk.Frame(preview_frame)
+nav_frame.pack(pady=10)
+
+prev_button = ttk.Button(nav_frame, text="Previous", command=prev_image, state="disabled")
+prev_button.grid(row=0, column=0, padx=5)
+
+image_index_label = ttk.Label(nav_frame, text="Image 0 of 0", width=30, anchor="center")
+image_index_label.grid(row=0, column=1, padx=5)
+
+next_button = ttk.Button(nav_frame, text="Next", command=next_image, state="disabled")
+next_button.grid(row=0, column=2, padx=5)
+
+finish_review_button = ttk.Button(preview_frame, text="Finish Review and Save", command=finish_review_and_save, state="disabled", style="RunButton.TButton")
+finish_review_button.pack(pady=10)
+
+status_label = ttk.Label(root, text="Ready", font=("Segoe UI", 10), foreground="#0078D4")
+status_label.pack(pady=5)
+
+root.mainloop()
