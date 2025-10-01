@@ -1,0 +1,66 @@
+import os
+from PIL import Image
+
+def extract_tif_frames(input_dir, output_dir):
+    """
+    Extracts individual frames from multi-frame TIFF files and saves them
+    as separate TIFF files.
+
+    Args:
+        input_dir (str): The path to the directory containing the input TIFF files.
+        output_dir (str): The path to the directory where the extracted frames
+                          will be saved.
+    """
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Input directory: {input_dir}")
+    print(f"Output directory: {output_dir}")
+
+    # Iterate over all files in the input directory
+    for filename in os.listdir(input_dir):
+        # Check if the file is a TIFF file
+        if filename.lower().endswith(".tif") or filename.lower().endswith(".tiff"):
+            input_filepath = os.path.join(input_dir, filename)
+            base_filename = os.path.splitext(filename)[0] # Get filename without extension
+
+            try:
+                # Open the TIFF image
+                img = Image.open(input_filepath)
+                print(f"\nProcessing '{filename}'...")
+
+                # Loop through the first 5 frames (or fewer if the image has less)
+                for i in range(5):
+                    try:
+                        img.seek(i) # Move to the desired frame
+                        output_filename = f"{base_filename}_Frame{i + 1}.tif"
+                        output_filepath = os.path.join(output_dir, output_filename)
+
+                        # Save the current frame.
+                        # The 'save' method of Pillow's Image object will preserve
+                        # the original data type (e.g., 16-bit, 32-bit) if the
+                        # image mode supports it.
+                        img.save(output_filepath)
+                        print(f"  Saved frame {i + 1} to '{output_filename}'")
+                    except EOFError:
+                        # Reached the end of frames, break the loop
+                        print(f"  No more frames found after frame {i}.")
+                        break
+                    except Exception as frame_e:
+                        print(f"  Error processing frame {i + 1} of '{filename}': {frame_e}")
+                        break # Stop processing frames for this file if an error occurs
+
+            except FileNotFoundError:
+                print(f"Error: File not found at '{input_filepath}'")
+            except Exception as e:
+                print(f"Error processing '{filename}': {e}")
+        else:
+            print(f"Skipping non-TIFF file: {filename}")
+
+# Define your input and output directories
+# IMPORTANT: Replace these paths with your actual paths
+input_directory = r"C:/Users/zm00198/OneDrive - University of Surrey/Desktop/6482526 PhD - NANOPC/Results/GUV Microscopy/PEG with GFP/gain 1 mEGFP 0 to 5/Original TIFs"
+output_directory = r"C:/Users/zm00198/OneDrive - University of Surrey/Desktop/6482526 PhD - NANOPC/Results/GUV Microscopy/PEG with GFP/gain 1 mEGFP 0 to 5"
+
+# Run the function
+extract_tif_frames(input_directory, output_directory)
+print("\nProcessing complete!")
