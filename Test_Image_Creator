@@ -1,0 +1,106 @@
+import numpy as np
+from skimage.draw import ellipse
+import tifffile
+
+# ==============================================================================
+# 1. USER CONFIGURATION
+# Adjust all the parameters for your image in this section.
+# ==============================================================================
+
+# --- Image Settings ---
+IMAGE_WIDTH = 1960
+IMAGE_HEIGHT = 1960
+BACKGROUND_INTENSITY = 5000  
+circles_properties = [
+    # GUV1: 
+    {'radius_y': 28.9,  'radius_x': 28.9,  'intensity': 25000},
+    # GUV2: 
+    {'radius_y': 57.8,  'radius_x': 57.8,  'intensity': 30000},
+    # GUV3: 
+    {'radius_y': 86.7,  'radius_x': 86.7,  'intensity': 35000},
+    # GUV4: 
+    {'radius_y': 115.6, 'radius_x': 115.6, 'intensity': 40000},
+    # GUV5: 
+    {'radius_y': 144.5,  'radius_x': 144.5,  'intensity': 45000},
+
+    
+
+    
+
+    
+]
+
+# ==============================================================================
+# 2. SAVE LOCATION
+# Define the file path where you want to save the final TIF image.
+# ==============================================================================
+
+# IMPORTANT: Change this path to where you want the file saved.
+# Example for Windows: 'C:/Users/YourName/Desktop/my_circles_image.tif'
+# Example for macOS/Linux: '/Users/YourName/Desktop/my_circles_image.tif'
+output_filepath = 'generated_circles.tif'
+
+
+# ==============================================================================
+# 3. IMAGE GENERATION LOGIC (No need to edit below this line)
+# ==============================================================================
+
+def create_and_save_image():
+    """
+    Generates an image based on the configuration above and saves it as a TIF file.
+    """
+    print("--- Starting Image Generation ---")
+    
+    # Create a blank image with the specified background intensity.
+    # We use np.uint16 for 16-bit depth, allowing intensity values from 0 to 65535.
+    image_array = np.full((IMAGE_HEIGHT, IMAGE_WIDTH), BACKGROUND_INTENSITY, dtype=np.uint16)
+    print(f"Created a {IMAGE_WIDTH}x{IMAGE_HEIGHT} image canvas with background intensity {BACKGROUND_INTENSITY}.")
+
+    # Calculate the positions for the 5 circles based on the image dimensions.
+    center_y, center_x = IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2
+    quarter_y, quarter_x = IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4
+
+    positions = [
+        (3 * quarter_y, quarter_x),     # 4. Bottom-Left
+        (3 * quarter_y, 3 * quarter_x),  # 5. Bottom-Right
+        (center_y, center_x),           # 1. Center
+        (quarter_y, quarter_x),         # 2. Top-Left
+        (quarter_y, 3 * quarter_x),     # 3. Top-Right
+    ]
+
+    # Draw each circle onto the image array.
+    for i, props in enumerate(circles_properties):
+        pos_y, pos_x = positions[i]
+
+        # Use skimage.draw.ellipse to get the pixel coordinates for the shape.
+        rr, cc = ellipse(
+            r=pos_y, c=pos_x,
+            r_radius=props['radius_y'],
+            c_radius=props['radius_x'],
+            shape=image_array.shape  # Ensures the shape does not go out of bounds
+        )
+
+        # Set the intensity (brightness) for the circle's pixels.
+        image_array[rr, cc] = props['intensity']
+        print(f"Drawing circle {i+1} at ({pos_y}, {pos_x}) with radii ({props['radius_y']}, {props['radius_x']}) and intensity {props['intensity']}.")
+
+    # Save the final numpy array as a TIF file.
+    try:
+        tifffile.imwrite(output_filepath, image_array)
+        print(f"Image successfully saved to: {output_filepath}")
+    except Exception as e:
+        print(f"Error saving image: {e}")
+    
+    print("--- Script Finished ---")
+
+# --- Main execution block ---
+# This ensures the code runs when you execute the script directly.
+if __name__ == "__main__":
+    
+    # Before running, make sure you have the required libraries installed.
+    # You can install them by running this command in the Spyder console (at the bottom right):
+    # !pip install numpy scikit-image tifffile
+    
+    create_and_save_image()
+
+
