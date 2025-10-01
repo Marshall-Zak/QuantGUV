@@ -1,0 +1,182 @@
+from openpyxl import Workbook
+import cv2
+import os
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+
+#Define Folders
+input_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\FluoroSphere_Data\1-Blank_GUVs\Standard_Curve\40x\Detector_Normailsed"
+output_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\Maskss"
+excel_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\FluoroSphere_Data\1-Blank_GUVs\40x_Blank_GUVs.xlsx"
+
+#Create Excel File 
+workbook = Workbook()
+sheet = workbook.active
+sheet.title = "Blank GUVs"
+
+#Define headers and start at next row 
+headers = "Image_Name", "GUV_Number", "GUV_Diameter", "GUV_Intensity"
+for col, header in enumerate(headers, start=1):
+    sheet.cell(row=1, column=col, value=header)
+excel_row = 2
+
+#Define Magnification 
+Magnification = "40x"
+if Magnification == "20x":
+    scale_factor = 200 / 578
+    
+elif Magnification == "40x":
+    scale_factor = 100 / 578
+    
+#Blob detector to detect GUVs 
+params = cv2.SimpleBlobDetector_Params()
+params.minThreshold = 5
+params.maxThreshold = 255
+params.filterByArea = True
+params.minArea =  1000 
+params.maxArea =  800000 
+params.filterByCircularity = True
+params.minCircularity = 0.3 #Due to low contrast the edge boundry is hard to determine so low circulatiry 
+params.filterByConvexity = False
+params.filterByInertia = False
+
+detector = cv2.SimpleBlobDetector_create(params)
+
+
+#Process each image in the Input Folder
+for filename in os.listdir(input_folder):
+    if filename.lower().endswith(".tif"):
+        image_path = os.path.join(input_folder, filename)
+        output_path = os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_GUVs.png") # Changed to .png for output
+
+        #import in greyscale for detection
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            print(f"Unable to Load {filename}")
+            continue
+        #Apply Image processing
+        equalized_image = cv2.equalizeHist(image)
+        smoothed_image = cv2.GaussianBlur(equalized_image, (11, 11), 0)
+
+        # Blob detection 
+        keypoints = detector.detect(smoothed_image)
+
+        # Draw keypoints on the image 
+        im_with_keypoints = cv2.drawKeypoints(
+            image, keypoints, np.array([]), (0, 20, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+        )
+        
+        # Load the original TIF image for intensity calculations 
+        original_gray = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)  
+        if original_gray is None:
+            print(f"Error: Unable to load the original image for intensity calculations: {filename}")  
+            continue
+
+        #Define Masks of GUVs and Background 
+        total_blob_mask = np.zeros_like(original_gray, dtype=np.uint8)
+        for kp in keypoints:
+            x, y = int(kp.pt[0]), int(kp.pt[1])
+            radius = int(kp.size / 2)
+            cv2.circle(total_blob_mask, (x, y), radius, 255, -1)
+            
+        background_mask = cv2.bitwise_not(total_blob_mask)
+
+        #use Mask to determine background mean
+        valid_pixels = background_mask > 0
+        # Corrected background intensity calculation: use original_gray with the mask
+        background_intensity = np.mean(original_gray[valid_pixels]) if valid_pixels.size > 0 else 0
+
+        # Write background intensity first (one row per image) 
+        sheet.cell(row=excel_row, column=1, value=filename)  # Image name
+        sheet.cell(row=excel_row, column=2, value="Background")  # Label "Background"
+        sheet.cell(row=excel_row, column=4, value=round(background_intensity, 2))  # Background intensity
+        excel_row += 1  # Move to the next row
+            
+        #GUV Details 
+        # Get image dimensions
+        height, width = original_gray.shape
+        # Write data for each blob
+        blob_info = [] # Reset for each image
+        for i, kp in enumerate(keypoints):
+            diameter_um = kp.size * scale_factor
+            
+            # Define the size of the square (10×10 pixels)
+            square_size = 10
+            half_size = square_size // 2
+
+            # Get coordinates for the square
+            x, y = int(kp.pt[0]), int(kp.pt[1])
+            top_left_x = max(x - half_size, 0)
+            top_left_y = max(y - half_size, 0)
+            bottom_right_x = min(x + half_size, original_gray.shape[1])
+            bottom_right_y = min(y + half_size, original_gray.shape[0])
+
+            # Extract square region for intensity calculation
+            square_region = original_gray[top_left_y:bottom_right_y, top_left_x:bottom_right_x]
+            GUV_intensity = np.mean(square_region)  # Average intensity inside the square
+
+            # Draw a blue square on the output image
+            cv2.rectangle(
+                im_with_keypoints,
+                (top_left_x, top_left_y),
+                (bottom_right_x, bottom_right_y),
+                (255, 0, 0),  # Blue color 
+                2  # Thickness
+            )
+            
+            # Write blob data to Excel 
+            sheet.cell(row=excel_row, column=1, value=filename)  # Image name
+            sheet.cell(row=excel_row, column=2, value=f"GUV {i + 1}")  # GUV number
+            sheet.cell(row=excel_row, column=3, value=round(diameter_um, 2))  # GUV diameter
+            sheet.cell(row=excel_row, column=4, value=round(GUV_intensity, 2))  # GUV intensity
+            excel_row += 1  # Move to the next row
+                        
+            # Add text annotation to the image (only blob number in the center of the red ring) 
+            cv2.putText(
+                im_with_keypoints,
+                f"{i + 1}",
+                (int(kp.pt[0]), int(kp.pt[1])),  # Position the text at the center of the blob
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),  # Green Text
+                1,
+                cv2.LINE_AA,
+            )
+            
+            blob_info.append(f"GUV {i + 1}: {diameter_um:.2f} µm, {GUV_intensity:.2f} intensity")
+
+        # Save smoothed image 
+        cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_smoothed.png"), smoothed_image)
+
+        # Create a canvas for the extended image (add space for the legend)
+        height, width = im_with_keypoints.shape[:2]
+        legend_height = 200  # Height for the legend
+        total_height = height + legend_height
+        extended_image = np.ones((total_height, width, 3), dtype=np.uint8) * 255  # White canvas
+        extended_image[:height, :width] = im_with_keypoints
+            
+        # Draw the legend using PIL 
+        pil_image = Image.fromarray(extended_image)
+        draw = ImageDraw.Draw(pil_image)
+        font = ImageFont.truetype("arial.ttf", 20)
+        text_color = "#002868"  # Text color for the legend
+            
+        legend_x, legend_y = 20, height + 20  # Position of the legend
+        for i, text in enumerate(blob_info):
+            draw.text((legend_x, legend_y + i * 30), text, font=font, fill=text_color)
+            
+        # Convert back to OpenCV format
+        extended_image = np.array(pil_image)
+            
+        # Save the extended image with the legend 
+        cv2.imwrite(output_path, extended_image)
+        print(f"Processed and saved: {output_path}")
+            
+            
+        # Debug: Save the masks for verification 
+        #cv2.imwrite(os.path.join(extra_insights_folder, f"{os.path.splitext(filename)[0]}_square_region.png"), square_region)
+        cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_blob_mask.png"), total_blob_mask) 
+        cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_background_mask.png"), background_mask)
+
+# Save the Excel workbook (Added at the very end, after the loop)
+workbook.save(excel_path)
