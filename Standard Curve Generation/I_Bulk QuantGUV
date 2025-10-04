@@ -4,10 +4,10 @@ import os
 from openpyxl import Workbook
 
 # Folder paths
-input_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\6482526 PhD - NANOPC\Results\GUV Microscopy\PEG with GFP\gain 1 mEGFP 0 to 5"
-output_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\6482526 PhD - NANOPC\Results\GUV Microscopy\PEG with GFP\gain 1 mEGFP 0 to 5"
+input_folder = r"INSERT_FILE_PATH_HERE"
+output_folder = r"INSERT_FILE_PATH_HERE"
 # Define the Excel file path
-excel_path = os.path.join(output_folder, "FS.xlsx")
+excel_path = os.path.join(output_folder, "I_Bulk_Data.xlsx")
 
 # Create a new Excel workbook and sheet
 workbook = Workbook()
