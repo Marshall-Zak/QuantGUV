@@ -5,9 +5,9 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
 #Define Folders
-input_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\FluoroSphere_Data\1-Blank_GUVs\Standard_Curve\40x\Detector_Normailsed"
-output_folder = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\Maskss"
-excel_path = r"C:\Users\zm00198\OneDrive - University of Surrey\Desktop\QuantGUV\FluoroSphere_Data\1-Blank_GUVs\40x_Blank_GUVs.xlsx"
+input_folder = r"INSERT_FILE_PATH_HERE"
+output_folder = r"INSERT_FILE_PATH_HERE"
+excel_path = r"INSERT_FILE_PATH_HERE"
 
 #Create Excel File 
 workbook = Workbook()
@@ -20,13 +20,13 @@ for col, header in enumerate(headers, start=1):
     sheet.cell(row=1, column=col, value=header)
 excel_row = 2
 
-#Define Magnification 
+#Define Magnification (these values are for a citation c10 confocal)
 Magnification = "40x"
 if Magnification == "20x":
-    scale_factor = 200 / 578
+    scale_factor = 200 / 578 # distance in um / distance in pixels
     
 elif Magnification == "40x":
-    scale_factor = 100 / 578
+    scale_factor = 100 / 578 # distance in um / distance in pixels
     
 #Blob detector to detect GUVs 
 params = cv2.SimpleBlobDetector_Params()
@@ -175,8 +175,8 @@ for filename in os.listdir(input_folder):
             
         # Debug: Save the masks for verification 
         #cv2.imwrite(os.path.join(extra_insights_folder, f"{os.path.splitext(filename)[0]}_square_region.png"), square_region)
-        cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_blob_mask.png"), total_blob_mask) 
-        cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_background_mask.png"), background_mask)
+        #cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_blob_mask.png"), total_blob_mask) 
+        #cv2.imwrite(os.path.join(output_folder, f"{os.path.splitext(filename)[0]}_background_mask.png"), background_mask)
 
 # Save the Excel workbook (Added at the very end, after the loop)
 workbook.save(excel_path)
